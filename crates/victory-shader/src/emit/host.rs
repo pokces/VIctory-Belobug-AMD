@@ -694,8 +694,37 @@ pub struct Draw<'a> {
     pub mesh_groups: u32,
 }
 
+/// WARP's turn: one draw or dispatch at a time.
+///
+/// Every `Host` on an adapter shares the one device D3D12 makes for it, so
+/// tests running in parallel use WARP's device from several threads at once.
+/// WARP then sometimes faults inside `d3d10warp.dll` (a null or near-null
+/// read while running a dispatch), which ends the whole test process: on
+/// Windows 11 build 26300, 3 of 16 parallel `victory-shader` runs, 0 of 16
+/// with WARP's work taken in turn. Hardware adapters still run in parallel.
+#[cfg(test)]
+static WARP_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 impl Host {
+    /// Holds [`WARP_TURN`] while the device is WARP's.
+    fn warp_turn(&self) -> Option<std::sync::MutexGuard<'static, ()>> {
+        self.software()
+            .then(|| WARP_TURN.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    /// Whether the device is on a software adapter (WARP).
+    fn software(&self) -> bool {
+        // SAFETY: plain DXGI queries about the device's own adapter.
+        unsafe {
+            let luid = self.device.GetAdapterLuid();
+            CreateDXGIFactory2::<IDXGIFactory4>(DXGI_CREATE_FACTORY_FLAGS(0))
+                .and_then(|f| f.EnumAdapterByLuid::<IDXGIAdapter1>(luid))
+                .and_then(|a| a.GetDesc1())
+                .is_ok_and(|d| d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0)
+        }
+    }
+
     /// Draws one triangle into an RGBA32F target and returns its texels.
     pub fn draw(
         &self,
@@ -703,6 +732,7 @@ impl Host {
         pso: &ID3D12PipelineState,
         d: &Draw,
     ) -> Result<Vec<[f32; 4]>, String> {
+        let _turn = self.warp_turn();
         let dev = &self.device;
         let (w, h) = d.size;
         // SAFETY: D3D12 calls with descriptions that outlive them; resources
@@ -1096,6 +1126,7 @@ impl Host {
         pso: &ID3D12PipelineState,
         d: &Dispatch,
     ) -> Result<Vec<Vec<u32>>, String> {
+        let _turn = self.warp_turn();
         let dev = &self.device;
         // SAFETY: D3D12 calls with descriptions that outlive them; resources
         // stay alive until the fence says the GPU is done.
