@@ -680,6 +680,10 @@ pub extern "system" fn XMemMapPhysicalPages(
     address
 }
 
+/// Reservations shorter than this are never shown whole (matches the GPU
+/// side's 16 MiB minimum for in-place mapped views).
+const WHOLE_MIN: usize = 16 * MIB;
+
 /// Reservations this long at most are shown whole.
 const WHOLE: usize = 1 << 30;
 
@@ -712,13 +716,19 @@ fn map_whole(physical: &mut Physical, base: usize, pages: &[usize]) -> bool {
             else {
                 return false;
             };
-            if len <= WHOLE {
+            if (WHOLE_MIN..=WHOLE).contains(&len) {
                 tracing::debug!(at = format_args!("{at:#x}"), len, section = first.section.1, views = ?physical.views.range(..at + len).next_back().map(|(v, (n, _))| (*v, *n)), "whole?");
             }
-            if len > WHOLE
+            if !(WHOLE_MIN..=WHOLE).contains(&len)
                 || len != first.section.1
                 || physical.views.range(..at + len).next_back().is_some_and(|(v, (n, _))| v + n > at)
                 || physical.whole.iter().any(|w| Arc::ptr_eq(&w.2, &first.section))
+                || !pages.iter().all(|p| {
+                    physical
+                        .pages
+                        .get(p)
+                        .is_some_and(|s| Arc::ptr_eq(&s.section, &first.section))
+                })
             {
                 return false;
             }
@@ -821,6 +831,9 @@ pub extern "system" fn XMemMapPhysicalPagesScatter(
 /// heap. Page by page; false if a source page is not mapped physical memory.
 pub fn map_alias(to: u64, from: u64, len: u64) -> bool {
     let (to, from, len) = (to as usize, from as usize, len as usize);
+    if len == 0 {
+        return true;
+    }
     let mut physical = physical();
     if in_whole(&physical, to, len) {
         tracing::warn!(to = format_args!("{to:#x}"), len, "page mappings into a reservation shown whole");
@@ -1624,6 +1637,38 @@ mod tests {
         assert_eq!(XMemMapPhysicalPages(a, 1, pages.as_ptr()), a);
         assert_eq!(XMemMapPhysicalPages(a, 1, std::ptr::null()), a);
         assert_eq!(XMemFreePhysicalPages(3, pages.as_ptr()), 1);
+    }
+
+    /// A reservation of at least `WHOLE_MIN` backed by a same-sized physical
+    /// allocation is shown whole in one view, and zero-length `map_alias`
+    /// remains a no-op while non-zero `map_alias` is refused.
+    #[test]
+    fn large_reservation_is_shown_whole() {
+        let n = WHOLE_MIN / PAGE;
+        let (pages, a) = pages_and_reservation(n);
+        assert_eq!(XMemMapPhysicalPages(a, 1, pages.as_ptr()), a);
+        let info = query(a).host;
+        assert_eq!(info.State, MEM_COMMIT);
+        assert_eq!(info.RegionSize, WHOLE_MIN);
+        assert!(map_alias(a as u64, a as u64, 0));
+        assert!(!map_alias(a as u64, 0, PAGE as u64));
+        assert_eq!(XMemFreePhysicalPages(n, pages.as_ptr()), 1);
+    }
+
+    /// An initial mapping call containing an unknown page must not coalesce
+    /// placeholders or map the reservation whole before failing.
+    #[test]
+    fn whole_map_rejects_invalid_page_without_mapping_whole() {
+        let n = WHOLE_MIN / PAGE;
+        let (pages, a) = pages_and_reservation(n);
+        let bad = [pages[0], usize::MAX];
+        assert!(XMemMapPhysicalPages(a, bad.len(), bad.as_ptr()).is_null());
+        assert!(!in_whole(&physical(), a as usize, WHOLE_MIN));
+        assert_eq!(query(a).host.State, MEM_COMMIT);
+        assert_eq!(query(a.wrapping_byte_add(PAGE)).host.State, MEM_RESERVE);
+        assert_eq!(XMemMapPhysicalPages(a, 1, std::ptr::null()), a);
+        assert_eq!(query(a).host.State, MEM_RESERVE);
+        assert_eq!(XMemFreePhysicalPages(n, pages.as_ptr()), 1);
     }
 }
 
