@@ -660,7 +660,10 @@ const fn queue_table(newer: bool) -> [*const (); 36] {
 static FUNCTIONS: Table<36> = Table(queue_table(false));
 static NEWER_FUNCTIONS: Table<36> = Table(queue_table(true));
 
+/// A queue for tests of its functions (none uses it since 161dc7f; kept
+/// for the next one).
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn test_queue() -> (This, usize) {
     let desc = QueueDesc {
         kind: 0,

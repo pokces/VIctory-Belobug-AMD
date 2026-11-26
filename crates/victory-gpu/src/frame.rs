@@ -153,6 +153,8 @@ pub(crate) extern "system" fn wait(
     token: *mut u64,
 ) -> HRESULT {
     let origin = kind == ORIGIN;
+    // Only the diagnostics build logs how long it waited.
+    #[cfg_attr(not(feature = "diagnostics"), allow(unused_variables))]
     let (wait, hr) = if uncapped() {
         last(kind).fetch_add(1, Ordering::Relaxed);
         (Duration::ZERO, S_OK)

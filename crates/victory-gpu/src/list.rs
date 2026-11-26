@@ -563,7 +563,7 @@ extern "system" fn barrier(this: This, count: u32, barriers: *const Barrier) -> 
         let barriers = unsafe { std::slice::from_raw_parts(barriers, count as usize) };
         let mut host: Vec<Barrier> = barriers
             .iter()
-            .filter_map(|b| host_barrier(&list, b))
+            .filter_map(|b| host_barrier(list, b))
             .collect();
         // Buffers have host copies, not resources the barrier can name:
         // a barrier on one waits for every shader write before it.
@@ -668,10 +668,10 @@ extern "system" fn copy_resource(this: This, dst: This, src: This) {
                 return;
             }
             if crate::texture::title_written(from) {
-                crate::texture::upload(&list, src, from);
+                crate::texture::upload(list, src, from);
             }
-            ensure_state(&list, dst, COPY_DEST);
-            ensure_state(&list, src, COPY_SOURCE);
+            ensure_state(list, dst, COPY_DEST);
+            ensure_state(list, src, COPY_SOURCE);
             crate::texture::host_written(dst);
             #[cfg(feature = "diagnostics")]
             list.note_op(|| format!("copy resource {src:?} to {dst:?}"));
@@ -865,8 +865,8 @@ extern "system" fn copy_texture_region(
             if crate::resource::skipped_mips(src.resource) > 0 {
                 return;
             }
-            crate::texture::upload(&list, src.resource, from_tex);
-            ensure_state(&list, src.resource, COPY_SOURCE);
+            crate::texture::upload(list, src.resource, from_tex);
+            ensure_state(list, src.resource, COPY_SOURCE);
             let mut to_location = dst;
             to_location.resource = buffer.as_raw().cast_const().cast();
             to_location.footprint.offset = 0;
@@ -954,16 +954,16 @@ extern "system" fn copy_texture_region(
                 return;
             }
             if crate::texture::title_written(texture) {
-                crate::texture::upload(&list, src.resource, texture);
+                crate::texture::upload(list, src.resource, texture);
             }
-            ensure_state(&list, src.resource, COPY_SOURCE);
+            ensure_state(list, src.resource, COPY_SOURCE);
             from.resource = texture.as_raw().cast_const().cast();
         }
         // shortcut: as in `copy_resource`.
         if crate::resource::skipped_mips(dst.resource) > 0 {
             return;
         }
-        ensure_state(&list, dst.resource, COPY_DEST);
+        ensure_state(list, dst.resource, COPY_DEST);
         crate::texture::host_written(dst.resource);
         let mut to_location = dst;
         to_location.resource = to.as_raw().cast_const().cast();
@@ -1047,8 +1047,8 @@ extern "system" fn resolve(
         use windows::core::Interface;
         const RESOLVE_DEST: u32 = 0x1000;
         const RESOLVE_SOURCE: u32 = 0x2000;
-        ensure_state(&list, dst, RESOLVE_DEST);
-        ensure_state(&list, src, RESOLVE_SOURCE);
+        ensure_state(list, dst, RESOLVE_DEST);
+        ensure_state(list, src, RESOLVE_SOURCE);
         crate::texture::host_written(dst);
         #[cfg(feature = "diagnostics")]
         list.note_op(|| format!("resolve {src:?} to {dst:?} format {format}"));
@@ -1176,7 +1176,7 @@ extern "system" fn clear_dsv(
             unsafe { std::slice::from_raw_parts(rects.cast(), count as usize) }
         });
         const DEPTH_WRITE: u32 = 0x10;
-        ensure_state(&list, record.resource, DEPTH_WRITE);
+        ensure_state(list, record.resource, DEPTH_WRITE);
         let dsv = host.dsv(texture, record.depth_desc().as_ref());
         // SAFETY: an open list, a fresh view of a live texture.
         unsafe {
@@ -1376,8 +1376,8 @@ fn host_resolve(this: This, heap: This, kind: u32, first: u32, count: u32, at: *
     };
     // Title memory first (the stand-in values and the bytes between
     // results), then the results over it.
-    shadow.refresh(&list, address, len);
-    shadow.gpu_writes(&list, address, len);
+    shadow.refresh(list, address, len);
+    shadow.gpu_writes(list, address, len);
     let to = shadow.offset(address);
     #[cfg(feature = "diagnostics")]
     list.note_op(|| format!("resolve {count} queries of type {kind} to {address:#x}"));

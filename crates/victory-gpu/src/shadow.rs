@@ -328,6 +328,7 @@ impl Shadow {
                 let gpu_new = unsafe {
                     std::slice::from_raw_parts((rb_ptr + (k as usize) * PAGE) as *const u8, n)
                 };
+                // SAFETY: as above.
                 let staging_old =
                     unsafe { std::slice::from_raw_parts_mut(self.data.add(off), n) };
                 if gpu_new == staging_old {
@@ -444,14 +445,14 @@ impl Shadow {
     /// This memory from a start `address` is a multiple of `element` bytes
     /// after.
     fn on_element(self: &Arc<Self>, address: u64, element: u64) -> Option<Arc<Shadow>> {
-        if element == 0 || (address - self.start) % element == 0 {
+        if element == 0 || (address - self.start).is_multiple_of(element) {
             return Some(self.clone());
         }
         let direct = self.direct.as_ref()?;
         let (page, first) = (PAGE as u64, self.start);
         let mut base = first + page;
         while base <= address && base - first <= 4096 * page {
-            if (address - base) % element == 0 {
+            if (address - base).is_multiple_of(element) {
                 let mut aliases = direct.aliases.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some((_, s)) = aliases.iter().find(|(b, _)| *b == base) {
                     return Some(s.clone());
@@ -1483,7 +1484,7 @@ const BLOCK: usize = 1 << 10;
 /// A quick hash, never 0.
 fn mixed(bytes: &[u8]) -> u64 {
     let mut h = [0x9e37_79b9_7f4a_7c15_u64, 0xc2b2_ae3d_27d4_eb4f, 0x1656_67b1_9e37_79f9, 0x27d4_eb2f_1656_67c5];
-    for c in bytes.chunks_exact(32) {
+    for c in bytes.as_chunks::<32>().0 {
         for (k, h) in h.iter_mut().enumerate() {
             let x = u64::from_le_bytes(c[8 * k..8 * k + 8].try_into().unwrap_or_default());
             *h = (*h ^ x).wrapping_mul(0x9fb2_1c65_1e98_df25).rotate_left(29);
@@ -1763,7 +1764,7 @@ pub(crate) fn sweep(frame: u64) {
     if given > 0 || took > std::time::Duration::from_millis(20) {
         tracing::info!(
             tiles = given,
-            megabytes = given * PAGE as u64 >> 20,
+            megabytes = (given * PAGE as u64) >> 20,
             frame,
             ms = took.as_millis() as u64,
             "tiles given back"
@@ -1998,14 +1999,14 @@ impl Shadow {
     /// A sparse copy from a start `address` is a multiple of `element` bytes
     /// after.
     fn sparse_on_element(self: &Arc<Self>, address: u64, element: u64) -> Option<Arc<Shadow>> {
-        if element == 0 || (address - self.start) % element == 0 {
+        if element == 0 || (address - self.start).is_multiple_of(element) {
             return Some(self.clone());
         }
         let s = self.sparse.as_ref()?;
         let page = PAGE as u64;
         let mut base = self.start + page;
         while base <= address && base - self.start <= 4096 * page {
-            if (address - base) % element == 0 {
+            if (address - base).is_multiple_of(element) {
                 let mut aliases = s.aliases.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(a) = aliases.iter().find(|a| a.start == base) {
                     return Some(a.clone());
@@ -2131,6 +2132,7 @@ impl Shadow {
                 // SAFETY: the tile's mapping and its snapshot (kept under the
                 // lock held above); this tile is this thread's alone.
                 let host = unsafe { std::slice::from_raw_parts_mut(data as *mut u8, n) };
+                // SAFETY: as above.
                 let old = unsafe { std::slice::from_raw_parts_mut(old as *mut u8, n) };
                 #[cfg(feature = "diagnostics")]
                 SPARSE_WRITES[2].fetch_add(n as u64, Ordering::Relaxed);

@@ -142,7 +142,7 @@ pub(crate) fn log(frames: f64) {
             n as f64 / frames,
             bytes as f64 / 1e6 / frames,
             us as f64 / 1e3 / frames,
-            crate::watch::layout(src as usize, len as usize)
+            crate::watch::layout(src, len)
         );
     }
 }

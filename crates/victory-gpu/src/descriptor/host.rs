@@ -394,6 +394,7 @@ impl BindlessPlan {
     /// Returns the title memory to bring up to date, by the same rule.
     /// And whether it is all of it (and may be looked at less often where it
     /// does not change) rather than what is new.
+    #[allow(clippy::type_complexity)]
     pub(crate) fn copy_constants(&self) -> (&[(Arc<crate::shadow::Shadow>, usize, usize)], bool) {
         let frame = crate::queue::presented() + 1;
         // Counted for all plans: each is the one before with a few changes.
@@ -1855,6 +1856,7 @@ impl HostHeap {
         let mut made_any = false;
         let mut fresh = Vec::new();
         let mut fresh_reads = Vec::new();
+        #[allow(clippy::type_complexity)]
         let mut results: Vec<(u32, Option<((u32, u32), Option<SlotUse>)>)> =
             Vec::with_capacity(todo.len());
         let mut over: Option<u32> = None;
@@ -2182,6 +2184,7 @@ impl HostHeap {
         text
     }
 
+    #[cfg(feature = "diagnostics")]
     pub(crate) fn describe_slot(&self, index: u32) -> Option<String> {
         let key = *self
             .made
@@ -2333,15 +2336,21 @@ fn view_stride(view: &View) -> u32 {
 fn view_count(view: &View) -> u32 {
     let srv = |w: &[u32; 10]| {
         let desc = srv_desc(w);
-        // SAFETY: a buffer view's union member.
-        (desc.ViewDimension == D3D12_SRV_DIMENSION_BUFFER)
-            .then(|| unsafe { desc.Anonymous.Buffer }.NumElements)
+        if desc.ViewDimension == D3D12_SRV_DIMENSION_BUFFER {
+            // SAFETY: a buffer view's union member.
+            Some(unsafe { desc.Anonymous.Buffer }.NumElements)
+        } else {
+            None
+        }
     };
     let uav = |w: &[u32; 10]| {
         let desc = uav_desc(w);
-        // SAFETY: a buffer view's union member.
-        (desc.ViewDimension == D3D12_UAV_DIMENSION_BUFFER)
-            .then(|| unsafe { desc.Anonymous.Buffer }.NumElements)
+        if desc.ViewDimension == D3D12_UAV_DIMENSION_BUFFER {
+            // SAFETY: a buffer view's union member.
+            Some(unsafe { desc.Anonymous.Buffer }.NumElements)
+        } else {
+            None
+        }
     };
     match view {
         View::Shader(_, Some(desc)) => srv(desc),

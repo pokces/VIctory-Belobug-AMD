@@ -1166,7 +1166,10 @@ pub(crate) fn module() -> HleModule {
     }
 }
 
+// The memory log below would move above this module once the open
+// `xmem` changes (#14, #16, #39) are settled; moved now it conflicts with them.
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 

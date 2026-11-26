@@ -108,6 +108,7 @@ pub(crate) struct State {
     fresh_records: Vec<[u32; 3]>,
     /// Of them, large ones by table: the records it was made from and the
     /// first dynamic slot. A shader that reads less of one takes the same.
+    #[allow(clippy::type_complexity)]
     large_tables: std::collections::HashMap<u64, Vec<(Vec<[u32; 3]>, u32)>>,
     /// What [`State::tables`] made for the stage being bound: root slot, byte
     /// offset of its fresh table. Kept to reuse its storage across draws.
