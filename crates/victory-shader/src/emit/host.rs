@@ -71,7 +71,7 @@ pub fn adapters() -> Result<Vec<String>, String> {
         let mut i = 0;
         while let Ok(a) = factory.EnumAdapters1(i) {
             let d = a.GetDesc1().map_err(err)?;
-            if d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 == 0 {
+            if !software_adapter(&d) {
                 out.push(description(&d.Description));
             }
             i += 1;
@@ -85,6 +85,13 @@ fn description(wide: &[u16]) -> String {
     String::from_utf16_lossy(&wide[..n])
 }
 
+/// The basic render driver can appear in hardware enumeration even without
+/// the software flag. Its Microsoft vendor and device IDs identify it.
+pub(super) fn software_adapter(desc: &DXGI_ADAPTER_DESC1) -> bool {
+    desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0
+        || (desc.VendorId == 0x1414 && desc.DeviceId == 0x008c)
+}
+
 impl Host {
     /// The default adapter, or WARP with `warp` (or `VICTORY_WARP=1`), or
     /// the first hardware adapter whose description holds
@@ -93,6 +100,20 @@ impl Host {
         let warp = warp || std::env::var("VICTORY_WARP").is_ok_and(|v| v == "1");
         match std::env::var("VICTORY_ADAPTER") {
             Ok(name) if !warp && !name.is_empty() => Self::on(&name),
+            #[cfg(test)]
+            _ if warp => {
+                // A process-wide reference keeps concurrent tests from creating
+                // and releasing the same software adapter's device.
+                let device = WARP_DEVICE.get_or_init(|| {
+                    let _turn = WARP_TURN.lock().unwrap_or_else(|e| e.into_inner());
+                    Self::create(true, None).map(|host| host.device)
+                });
+                device.clone().map(|device| Host { device })
+            }
+            // Hardware-only tests must not run on a software default adapter.
+            #[cfg(test)]
+            _ => Self::on(""),
+            #[cfg(not(test))]
             _ => Self::create(warp, None),
         }
     }
@@ -102,23 +123,31 @@ impl Host {
     pub fn on(name: &str) -> Result<Self, String> {
         let want = name.to_lowercase();
         // SAFETY: plain DXGI calls.
-        let adapter = unsafe {
+        unsafe {
             let factory: IDXGIFactory1 = CreateDXGIFactory1().map_err(err)?;
             let mut i = 0;
             loop {
-                let a = factory
-                    .EnumAdapters1(i)
-                    .map_err(|_| format!("no adapter named {name:?}"))?;
+                let a = factory.EnumAdapters1(i).map_err(|_| {
+                    if name.is_empty() {
+                        "no hardware adapter".to_owned()
+                    } else {
+                        format!("no adapter named {name:?}")
+                    }
+                })?;
+                i += 1;
                 let d = a.GetDesc1().map_err(err)?;
-                if d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 == 0
+                if !software_adapter(&d)
                     && description(&d.Description).to_lowercase().contains(&want)
                 {
-                    break a;
+                    let host = Self::create(false, Some(a.cast().map_err(err)?))?;
+                    #[cfg(test)]
+                    if host.software() {
+                        continue;
+                    }
+                    return Ok(host);
                 }
-                i += 1;
             }
-        };
-        Self::create(false, Some(adapter.cast().map_err(err)?))
+        }
     }
 
     fn create(warp: bool, adapter: Option<IDXGIAdapter>) -> Result<Self, String> {
@@ -301,8 +330,16 @@ impl Host {
                 blob.GetBufferPointer().cast::<u8>(),
                 blob.GetBufferSize(),
             );
-            self.device.CreateRootSignature(0, bytes).map_err(err)
+            self.root_signature_bytes(bytes)
         }
+    }
+
+    /// Creates a root signature from a serialized signature or a DXIL container.
+    pub(super) fn root_signature_bytes(&self, bytes: &[u8]) -> Result<ID3D12RootSignature, String> {
+        #[cfg(test)]
+        let _turn = self.warp_turn();
+        // SAFETY: the slice contains the serialized signature for the call.
+        unsafe { self.device.CreateRootSignature(0, bytes) }.map_err(err)
     }
 
     /// A compute pipeline; user data is root parameter 0.
@@ -329,6 +366,8 @@ impl Host {
             },
             ..Default::default()
         };
+        #[cfg(test)]
+        let _turn = self.warp_turn();
         // SAFETY: the description points at live data.
         unsafe { self.device.CreateComputePipelineState(&desc) }.map_err(err)
     }
@@ -451,6 +490,8 @@ impl Host {
             desc.DSVFormat = DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
             desc.DepthStencilState.StencilEnable = true.into();
         }
+        #[cfg(test)]
+        let _turn = self.warp_turn();
         // SAFETY: the description points at live data.
         let pso = unsafe { self.device.CreateGraphicsPipelineState(&desc) };
         pso.map_err(err)
@@ -561,6 +602,8 @@ impl Host {
             SizeInBytes: size_of::<Stream>(),
             pPipelineStateSubobjectStream: (&raw mut stream).cast(),
         };
+        #[cfg(test)]
+        let _turn = self.warp_turn();
         let device: ID3D12Device2 = self.device.cast().map_err(err)?;
         // SAFETY: the stream points at live data and outlives the call.
         unsafe { device.CreatePipelineState(&desc) }.map_err(err)
@@ -694,16 +737,13 @@ pub struct Draw<'a> {
     pub mesh_groups: u32,
 }
 
-/// WARP's turn: one draw or dispatch at a time.
-///
-/// Every `Host` on an adapter shares the one device D3D12 makes for it, so
-/// tests running in parallel use WARP's device from several threads at once.
-/// WARP then sometimes faults inside `d3d10warp.dll` (a null or near-null
-/// read while running a dispatch), which ends the whole test process: on
-/// Windows 11 build 26300, 3 of 16 parallel `victory-shader` runs, 0 of 16
-/// with WARP's work taken in turn. Hardware adapters still run in parallel.
+/// Parallel tests share WARP's device. Pipeline creation and execution both
+/// enter its compiler, so both need to take the same turn.
 #[cfg(test)]
 static WARP_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+static WARP_DEVICE: std::sync::OnceLock<Result<ID3D12Device, String>> = std::sync::OnceLock::new();
 
 #[cfg(test)]
 impl Host {
@@ -714,14 +754,19 @@ impl Host {
     }
 
     /// Whether the device is on a software adapter (WARP).
-    fn software(&self) -> bool {
+    pub(super) fn software(&self) -> bool {
+        if let Some(Ok(device)) = WARP_DEVICE.get()
+            && device == &self.device
+        {
+            return true;
+        }
         // SAFETY: plain DXGI queries about the device's own adapter.
         unsafe {
             let luid = self.device.GetAdapterLuid();
             CreateDXGIFactory2::<IDXGIFactory4>(DXGI_CREATE_FACTORY_FLAGS(0))
                 .and_then(|f| f.EnumAdapterByLuid::<IDXGIAdapter1>(luid))
                 .and_then(|a| a.GetDesc1())
-                .is_ok_and(|d| d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0)
+                .is_ok_and(|d| software_adapter(&d))
         }
     }
 
