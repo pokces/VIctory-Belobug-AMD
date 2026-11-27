@@ -1422,12 +1422,27 @@ fn build_lanes_cs(body: &[u32], target: super::Target) -> Result<HostShader, Str
     })
 }
 
-/// Builds this wave64 fixture for the selected host. Some shaders need a real
-/// 64-lane wave; skip only the translator's explicit capability refusal.
-fn build_lanes_cs_for_host(body: &[u32], host: &Host) -> Option<HostShader> {
+/// The translator can execute a console wave whole or in two 32-lane halves.
+/// A runner without either wave size still checks the native wave64 bytecode.
+fn build_lanes_cs_for_host(body: &[u32]) -> Option<(Host, HostShader)> {
+    let host = Host::new(false).ok().filter(|host| {
+        let target = host.target();
+        target.runs(32) || target.runs(64)
+    });
+    let Some(host) = host else {
+        let native = super::Target { lanes_min: 64, lanes_max: 64 };
+        let mut shader = build_lanes_cs(body, native).expect("wave64 translation");
+        let container = crate::Container::parse(&shader.dxil).expect("wave64 container");
+        assert!(container.part(crate::FourCC::DXIL).is_some(), "missing wave64 DXIL");
+        if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
+            v.validate(&mut shader.dxil).expect("wave64 DXIL validation");
+        }
+        eprintln!("checked wave64 bytecode; no 32- or 64-lane adapter for readback");
+        return None;
+    };
     let target = host.target();
     match build_lanes_cs(body, target) {
-        Ok(shader) => Some(shader),
+        Ok(shader) => Some((host, shader)),
         Err(error)
             if !target.runs(64)
                 && error.contains("console wave64 lanes on a host without 64-lane waves") =>
@@ -1459,11 +1474,7 @@ fn loop_exit_mask_counted_after_the_loop() {
         0xBE84_1002, // s_bcnt1_i32_b64 s4, s[2:3]
         0x7E00_0204, // v_mov_b32 v0, s4
     ];
-    let Ok(host) = Host::new(false) else {
-        eprintln!("no SM 6.6 hardware device; skipped");
-        return;
-    };
-    let Some(shader) = build_lanes_cs_for_host(&body, &host) else {
+    let Some((host, shader)) = build_lanes_cs_for_host(&body) else {
         return;
     };
     let (root, pso) = host.compute_pipeline(&shader).expect("pipeline");
@@ -1506,11 +1517,7 @@ fn scalar_counted_in_a_divergent_loop_read_after_it() {
         0x88FE_027E, // s_or_b64 exec, exec, s[2:3]
         0x7E00_0206, // v_mov_b32 v0, s6
     ];
-    let Ok(host) = Host::new(false) else {
-        eprintln!("no SM 6.6 hardware device; skipped");
-        return;
-    };
-    let Some(shader) = build_lanes_cs_for_host(&body, &host) else {
+    let Some((host, shader)) = build_lanes_cs_for_host(&body) else {
         return;
     };
     let (root, pso) = host.compute_pipeline(&shader).expect("pipeline");
@@ -1548,11 +1555,7 @@ fn mask_grown_inside_a_branch_counted_after_it() {
         0xBE86_1002, // s_bcnt1_i32_b64 s6, s[2:3]
         0x7E00_0206, // v_mov_b32 v0, s6
     ];
-    let Ok(host) = Host::new(false) else {
-        eprintln!("no SM 6.6 hardware device; skipped");
-        return;
-    };
-    let Some(shader) = build_lanes_cs_for_host(&body, &host) else {
+    let Some((host, shader)) = build_lanes_cs_for_host(&body) else {
         return;
     };
     let (root, pso) = host.compute_pipeline(&shader).expect("pipeline");
@@ -1603,11 +1606,7 @@ fn scalar_counted_in_nested_divergent_loops() {
         0x88FE_027E, // s_or_b64 exec, exec, s[2:3]
         0x7E00_0206, // v_mov_b32 v0, s6
     ];
-    let Ok(host) = Host::new(false) else {
-        eprintln!("no SM 6.6 hardware device; skipped");
-        return;
-    };
-    let Some(shader) = build_lanes_cs_for_host(&body, &host) else {
+    let Some((host, shader)) = build_lanes_cs_for_host(&body) else {
         return;
     };
     let (root, pso) = host.compute_pipeline(&shader).expect("pipeline");
