@@ -182,6 +182,7 @@ pub(crate) fn place(
 /// have memory, the bytes of their slots in use, how many slabs, and the
 /// size class that wastes most with its slab and used bytes.
 #[cfg(feature = "diagnostics")]
+#[allow(clippy::type_complexity)]
 pub(crate) fn census() -> [(u64, u64, u64, (u64, u64, u64)); 2] {
     let slabs = SLABS.lock().unwrap_or_else(|e| e.into_inner());
     let mut out = [(0, 0, 0, (0, 0, 0)); 2];

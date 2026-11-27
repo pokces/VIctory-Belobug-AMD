@@ -190,13 +190,16 @@ impl NativeProgram {
     }
 }
 
+/// A `VICTORY_SHADER_PATCH` entry: container length, code length, offset, cleared bits, set bits.
+type Patch = (usize, usize, usize, u32, u32);
+
 /// Diagnostics: `VICTORY_SHADER_PATCH=<container bytes>:<code bytes>:<code
 /// offset>:<bits to clear>:<bits to set>,...` (all hexadecimal) changes one
 /// word of the machine code of the programs of that size before they are
 /// translated, to see what a part of a shader does to the picture. Each
 /// entry: container length, code length, offset, cleared bits, set bits.
-pub fn diagnostic_patches() -> &'static [(usize, usize, usize, u32, u32)] {
-    static PATCHES: std::sync::OnceLock<Vec<(usize, usize, usize, u32, u32)>> = std::sync::OnceLock::new();
+pub fn diagnostic_patches() -> &'static [Patch] {
+    static PATCHES: std::sync::OnceLock<Vec<Patch>> = std::sync::OnceLock::new();
     PATCHES.get_or_init(|| {
         let list = std::env::var("VICTORY_SHADER_PATCH").unwrap_or_default();
         list.split(',')
@@ -386,7 +389,7 @@ pub enum RootType {
 impl RootType {
     /// Not the title's: the host's first view of memory by address
     /// (`emit::lower`, `Lower::memory`), as user data.
-    pub const MEMORY: RootType = RootType::Other(0x4D45_4D);
+    pub const MEMORY: RootType = RootType::Other(0x004D_454D);
     /// Not the title's: what the host adds to the group's x, as user data
     /// (a dispatch of more groups than the host's most is many of its).
     pub const GROUPS: RootType = RootType::Other(0x4752_5053);
@@ -594,7 +597,7 @@ fn accc_program(part: &[u8], root: &[u8]) -> Result<NativeProgram, ShaderError> 
             slot: slot as u8,
         });
     }
-    if next > u32::from(SGPRS) {
+    if next > SGPRS {
         return Err(Malformed("root parameter outside the SGPRs"));
     }
     Ok(NativeProgram {

@@ -180,7 +180,7 @@ impl CardState {
             return None;
         }
         let (min_bytes, max_bytes) = limits();
-        if size < min_bytes || size >= (1 << 30) || size % PAGE as u64 != 0 {
+        if size < min_bytes || size >= (1 << 30) || !size.is_multiple_of(PAGE as u64) {
             return None;
         }
         if !host.card_ready() {
@@ -502,6 +502,7 @@ impl CardEngine {
     }
 
     /// Dispatches `CARD_COMPARE` for `count` contiguous 64 KiB pieces starting at `first`.
+    #[allow(clippy::too_many_arguments)]
     unsafe fn dispatch_hash(
         &self,
         list: &ID3D12GraphicsCommandList,
@@ -538,6 +539,7 @@ impl CardEngine {
         writes: &[(Arc<crate::shadow::Shadow>, usize, usize)],
     ) -> (Option<ID3D12CommandList>, CardPlan) {
         // 1. Drain all card shadows with pending CPU -> VRAM uploads.
+        #[allow(clippy::type_complexity)]
         let mut dirty_cards: Vec<(Arc<CardState>, Vec<(usize, usize)>)> = Vec::new();
         {
             let mut q = DIRTY_CARDS.lock().unwrap_or_else(|e| e.into_inner());
@@ -593,6 +595,7 @@ impl CardEngine {
 
         // Also check which dirty-uploaded shadows already have hashes (so we
         // re-hash their newly uploaded pieces after CopyBufferRegion).
+        #[allow(clippy::type_complexity)]
         let mut rehash_uploads: Vec<(Arc<CardState>, ID3D12Resource, Vec<(u32, u32)>)> = Vec::new();
         for (card, ranges) in &dirty_cards {
             // Skip partial rehash if this card is already getting a full hash below.
@@ -816,8 +819,8 @@ impl CardEngine {
         if plan.entries.is_empty() {
             return 0;
         }
-        // SAFETY: GPU finished writing `differs_rb` before the fence returned.
         let differs: &[u32] = if plan.total_pieces > 0 {
+            // SAFETY: GPU finished writing `differs_rb` before the fence returned.
             unsafe {
                 std::slice::from_raw_parts(
                     self.differs_rb.1 as *const u32,
@@ -880,6 +883,8 @@ impl CardEngine {
         if total_bytes > 0
             && let Some((fetch_res, fetch_ptr)) = self.ensure_fetch_capacity(host, total_bytes)
         {
+            // SAFETY: the engine's own allocator and list; the last list
+            // recorded on them was waited for (`execute_and_wait_locked`).
             let ok = unsafe {
                 self.fetch_alloc.Reset().is_ok()
                     && self.fetch_list.Reset(&self.fetch_alloc, None).is_ok()
@@ -888,6 +893,8 @@ impl CardEngine {
                 for run in &dirty_runs {
                     let entry = &plan.entries[run.entry_idx];
                     // SAFETY: `vram` is in COMMON (promotes to COPY_SOURCE, decays to COMMON).
+                    // SAFETY: recording into the list reset above; `fetch_res`
+                    // holds `total_bytes` and each run lies inside its card.
                     unsafe {
                         self.fetch_list.CopyBufferRegion(
                             &fetch_res,
@@ -898,12 +905,14 @@ impl CardEngine {
                         );
                     }
                 }
+                // SAFETY: closing the list recorded above.
                 if unsafe { self.fetch_list.Close() }.is_ok()
                     && let Ok(cmd) = self.fetch_list.cast::<ID3D12CommandList>()
                 {
                     host.execute_and_wait_locked(cmd, submitted);
 
                     // Group dirty runs by entry so distinct shadows merge in parallel.
+                    #[allow(clippy::type_complexity)]
                     let mut per_entry: Vec<(usize, Vec<(u32, u32, usize)>)> = Vec::new();
                     for run in &dirty_runs {
                         let ptr = fetch_ptr + run.rb_offset as usize;
@@ -1026,6 +1035,8 @@ mod tests {
         host.execute_and_wait_locked(before.unwrap(), &mut submitted);
         host.execute_and_wait_locked(after, &mut submitted);
 
+        // SAFETY: `differs_rb` holds a word per piece, written by the lists
+        // waited for above.
         let differs_1 = unsafe {
             std::slice::from_raw_parts(engine.differs_rb.1 as *const u32, pages).to_vec()
         };
@@ -1037,7 +1048,10 @@ mod tests {
         // 4 different bytes on the same page 2.
         let (patch_buf, patch_ptr) = host.shared_buffer(256).expect("patch buffer");
         let gpu_bytes = [0xDEu8, 0xAD, 0xBE, 0xEF];
+        // SAFETY: `patch_ptr` maps the 256 bytes of `patch_buf`.
         unsafe { std::ptr::copy_nonoverlapping(gpu_bytes.as_ptr(), patch_ptr, 4) };
+        // SAFETY: D3D12 calls on the test's device and objects, which outlive
+        // the waited lists; `differs_rb` as above.
         unsafe {
             let alloc: ID3D12CommandAllocator = host
                 .device

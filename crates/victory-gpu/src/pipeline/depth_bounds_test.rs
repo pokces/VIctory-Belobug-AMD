@@ -258,7 +258,7 @@ fn render_with_depth_bounds(host: &crate::host::Host, shader: Arc<Shader>, ps: O
     bounds(list, 0.5, 0.75);
     draw_pixel(2); // Includes the stored depth, excludes the triangle depth.
     bounds(list, 0.0, 0.25);
-    submit(&commands);
+    submit(commands);
 
     assert_eq!(slot::<extern "system" fn(This, This, This) -> HRESULT>(list, 0x50)(list, allocator, null), S_OK);
     // Resetting a list whose host list is still referenced (here by
@@ -294,7 +294,7 @@ fn render_with_depth_bounds(host: &crate::host::Host, shader: Arc<Shader>, ps: O
         l.ResourceBarrier(&[crate::host::transition(&depth, D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
         l.CopyTextureRegion(&to, 0, 0, 0, &from, None);
     }
-    submit(&commands);
+    submit(commands);
     let mut mapped = std::ptr::null_mut();
     // SAFETY: the GPU copy finished and the readback buffer holds at least four floats.
     let actual = unsafe {

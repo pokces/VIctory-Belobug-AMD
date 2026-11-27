@@ -63,7 +63,10 @@ pub(crate) struct Shader {
     container: Vec<u8>,
     /// It is left out: it animates or draws hair strands ([`hair_strands`]),
     /// or serves rays that do not run ([`idle_without_rays`]).
+    /// Only read where draws are skipped, which is in the diagnostics build
+    /// alone (`skipped_shader`): a release build runs these programs.
     #[cfg(windows)]
+    #[cfg_attr(not(feature = "diagnostics"), allow(dead_code))]
     hair: bool,
     /// Its result gets the least indirect light ([`crate::ambient`]).
     #[cfg(windows)]

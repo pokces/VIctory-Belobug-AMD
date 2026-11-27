@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 #[repr(C, align(16))]
 struct Context([u8; 1232]);
 
+#[allow(dead_code)] // the stack pointer's place, beside the others
 const RSP: usize = 0x98;
 const RIP: usize = 0xF8;
 const FLAGS: usize = 0x30;
@@ -282,7 +283,7 @@ fn write(file: &str, stacks: &HashMap<Vec<u64>, u32>, others: &HashMap<Vec<u64>,
     let mut text = format!("{total} samples\n");
     for (title, counts, most) in [("in itself", own, 40), ("with what it calls", with, 90)] {
         let mut all: Vec<_> = counts.into_iter().collect();
-        all.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+        all.sort_unstable_by_key(|e| std::cmp::Reverse(e.1));
         text.push_str(&format!("-- {title}\n"));
         for (name, n) in all.into_iter().take(most) {
             let share = f64::from(n) * 100.0 / f64::from(total.max(1));

@@ -294,6 +294,7 @@ pub(crate) fn stretch(at: usize, end: usize, reach: usize) -> Option<(usize, usi
 /// the views, their sections, the longest view, and the runs of views that
 /// follow one another in their section too (one run: the range is one
 /// stretch of a section).
+#[cfg(feature = "diagnostics")]
 pub(crate) fn layout(at: usize, len: usize) -> (usize, usize, usize, usize) {
     let views = VIEWS.lock().unwrap_or_else(|e| e.into_inner());
     let Some(views) = views.as_ref() else { return (0, 0, 0, 0) };
