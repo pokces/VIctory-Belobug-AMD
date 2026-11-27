@@ -176,9 +176,8 @@ The first launch after a build translates every shader and builds about
 - Windows 10 is reported not to get past start-up without a newer D3D12
   runtime (issue #9, pull request #44, not merged or tried here yet); this
   fork has only been run on Windows 11.
-- Tests that fail on this machine, before and after this update:
-  `list::tests::lists_are_cut_at_waits_that_follow_work` in `victory-gpu`
-  and five `xmem` tests in `victory-hle` (issues #2 and #8).
+- The original test machine also reported a failure in the `victory-gpu`
+  test `list::tests::lists_are_cut_at_waits_that_follow_work`.
 - Many changes are specific to this title and this GPU, and some are marked
   `shortcut:` in the code where they approximate what the console does.
 
