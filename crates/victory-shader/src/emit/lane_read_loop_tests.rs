@@ -14,12 +14,13 @@
 //! every hardware adapter; each wrong lane is listed.
 
 use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_12_0;
-use windows::Win32::Graphics::Direct3D12::{D3D12CreateDevice, ID3D12Device};
-use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, IDXGIAdapter1, IDXGIFactory1,
+use windows::Win32::Graphics::Direct3D12::{
+    D3D12_FEATURE_D3D12_OPTIONS1, D3D12_FEATURE_DATA_D3D12_OPTIONS1, D3D12CreateDevice,
+    ID3D12Device,
 };
+use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1};
 
-use super::host::{Dispatch, Host, Root, View};
+use super::host::{Dispatch, Host, Root, View, software_adapter};
 use crate::native::{ComputeIo, RootParam, RootType, StageIo};
 
 /// The program for waves of `wave` lanes, one wave per group, reading
@@ -92,15 +93,13 @@ fn devices() -> Vec<(String, Host)> {
     let mut out = Vec::new();
     // SAFETY: plain DXGI and D3D12 calls with valid out pointers.
     unsafe {
-        let Ok(factory) = CreateDXGIFactory1::<IDXGIFactory1>() else {
-            return out;
-        };
+        let factory = CreateDXGIFactory1::<IDXGIFactory1>().expect("DXGI factory");
         let mut i = 0;
         while let Ok(a) = factory.EnumAdapters1(i) {
             i += 1;
             let a: IDXGIAdapter1 = a;
             let Ok(d) = a.GetDesc1() else { continue };
-            if d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0 {
+            if software_adapter(&d) {
                 continue;
             }
             let n = d.Description.iter().position(|&c| c == 0).unwrap_or(128);
@@ -109,7 +108,11 @@ fn devices() -> Vec<(String, Host)> {
             if D3D12CreateDevice(&a, D3D_FEATURE_LEVEL_12_0, &mut device).is_ok()
                 && let Some(device) = device
             {
-                out.push((name, Host { device }));
+                let host = Host { device };
+                // A virtual display adapter can yield the software renderer's device.
+                if host.device.GetAdapterLuid() == d.AdapterLuid || !host.software() {
+                    out.push((name, host));
+                }
             }
         }
     }
@@ -132,12 +135,53 @@ fn emit(native: &crate::NativeProgram, target: super::Target) -> super::HostShad
 #[test]
 fn lane_reads_in_a_loop_lanes_leave_at_different_iterations() {
     let mut wrong = Vec::new();
-    let mut ran = 0;
+    let mut hosts = devices();
+    if hosts.is_empty() {
+        if let Ok(warp) = Host::new(true) {
+            let mut caps = D3D12_FEATURE_DATA_D3D12_OPTIONS1::default();
+            // SAFETY: the structure and its size match the requested feature.
+            unsafe {
+                warp.device.CheckFeatureSupport(
+                    D3D12_FEATURE_D3D12_OPTIONS1,
+                    (&raw mut caps).cast(),
+                    size_of_val(&caps) as u32,
+                )
+            }
+            .expect("WARP wave capabilities");
+            if caps.WaveOps.as_bool()
+                && (caps.WaveLaneCountMin..=caps.WaveLaneCountMax).contains(&32)
+            {
+                hosts.push((String::from("WARP"), warp));
+            }
+        }
+        if hosts.is_empty() {
+            eprintln!(
+                "No hardware or SM 6.6 wave32 WARP for lane readback; checking translated wave sizes."
+            );
+        }
+    }
     for (wave, lane) in [(32, 20), (64, 40)] {
-        for (name, host) in devices() {
+        let native = program(wave, lane);
+        // Both targets must translate even on a machine without a suitable adapter.
+        // A 32-lane host runs the console wave64 as two halves.
+        for max in [32, 64] {
+            let cs = emit(
+                &native,
+                super::Target {
+                    lanes_min: 32,
+                    lanes_max: max,
+                },
+            );
+            let container = crate::Container::parse(&cs.dxil).unwrap();
+            let psv = container.part(crate::FourCC::PSV0).unwrap().data;
+            let expected = wave.min(max);
+            assert_eq!(crate::dxbc::u32_at(psv, 4 + 16).unwrap(), expected);
+            assert_eq!(crate::dxbc::u32_at(psv, 4 + 20).unwrap(), expected);
+        }
+        for (name, host) in &hosts {
             // For the host's waves: a wave64 program runs in two halves
             // where there are no 64-lane waves.
-            let cs = emit(&program(wave, lane), host.target());
+            let cs = emit(&native, host.target());
             let (root, pso) = host
                 .compute_pipeline(&cs)
                 .unwrap_or_else(|e| panic!("{name}: wave{wave}: {e}"));
@@ -156,7 +200,6 @@ fn lane_reads_in_a_loop_lanes_leave_at_different_iterations() {
                 )
                 .unwrap()
                 .remove(0);
-            ran += 1;
             let bad: Vec<String> = (0..wave)
                 .filter(|&t| out[t as usize] != t + lane)
                 .map(|t| format!("{t}: {} (want {})", out[t as usize], t + lane))
@@ -173,6 +216,5 @@ fn lane_reads_in_a_loop_lanes_leave_at_different_iterations() {
             }
         }
     }
-    assert!(ran > 0, "no adapter ran the program");
     assert!(wrong.is_empty(), "wrong on {wrong:?}");
 }
