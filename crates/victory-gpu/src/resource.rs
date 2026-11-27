@@ -3901,96 +3901,154 @@ mod tests {
         }
     }
 
-    /// An earlier title-memory upload must not suppress a later alias copy
-    /// from a GPU-written probe atlas into the same sampled texture.
+    /// An uploaded view must copy its first GPU writer, reuse the copy while
+    /// the writer is unchanged, and refresh it when a different writer is sampled.
     #[cfg(all(windows, feature = "diagnostics"))]
     #[test]
-    fn alias_after_title_upload_copies_the_gpu_atlas() {
+    fn alias_after_title_upload_copies_the_gpu_atlas_and_tracks_its_source() {
         use std::sync::atomic::Ordering::Relaxed;
         use windows::Win32::Graphics::Direct3D12::*;
 
         let Some(host) = crate::host::host() else {
+            eprintln!("skipping texture alias readback: no D3D12 device");
             return;
         };
         let null = std::ptr::null();
-        let mut source = null;
         let mut view = null;
         let source_desc = ResourceDesc {
             flags: 4,
             ..texture(4, 4, 42, 1)
         };
-        assert_eq!(
-            create_committed(
-                null, &PROPERTIES, 0, &source_desc, 0, null.cast(), &RESOURCE_IIDS[0], &mut source,
-            ),
-            S_OK
-        );
+        let make_source = || {
+            let mut source = null;
+            assert_eq!(
+                create_committed(
+                    null,
+                    &PROPERTIES,
+                    0,
+                    &source_desc,
+                    0,
+                    null.cast(),
+                    &RESOURCE_IIDS[0],
+                    &mut source,
+                ),
+                S_OK
+            );
+            source
+        };
+        let source = make_source();
+        let next_source = make_source();
         assert_eq!(
             create_at_address(
-                null, resource(source).data() as u64, &texture(4, 4, 67, 1), 0,
-                null.cast(), &RESOURCE_IIDS[0], &mut view,
+                null,
+                resource(source).data() as u64,
+                &texture(4, 4, 67, 1),
+                0,
+                null.cast(),
+                &RESOURCE_IIDS[0],
+                &mut view,
             ),
             S_OK
         );
         resource(view).host.placed.store(true, Relaxed);
         assert_eq!(alias_of(view), Some(source));
-        let written = host_resource(source).unwrap();
         let sampled = host_resource(view).unwrap();
-        let (upload, data) = host.upload_buffer(1024).unwrap();
-        let seed = host.new_list().unwrap();
-        let packed_light = 0x8c02_0100_u32;
-        // SAFETY: four rows of four texels in the upload's 1024 mapped bytes.
-        unsafe {
-            for row in 0..4 {
-                for x in 0..4 {
-                    data.add(row * 256 + x * 4).cast::<u32>().write_unaligned(packed_light);
+        let write_pattern = |list: &crate::host::HostList, target: This, value: u32| {
+            let written = host_resource(target).unwrap();
+            let (upload, data) = host.upload_buffer(1024).unwrap();
+            // SAFETY: four rows of four texels fit in the mapped upload. The
+            // list retains the upload until the GPU has consumed the copy.
+            unsafe {
+                for row in 0..4 {
+                    for x in 0..4 {
+                        data.add(row * 256 + x * 4)
+                            .cast::<u32>()
+                            .write_unaligned(value);
+                    }
                 }
-            }
-            let dst = D3D12_TEXTURE_COPY_LOCATION {
-                pResource: std::mem::transmute_copy(written),
-                Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
-                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
-            };
-            let src = D3D12_TEXTURE_COPY_LOCATION {
-                pResource: std::mem::transmute_copy(&upload),
-                Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
-                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
-                    PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
-                        Offset: 0,
-                        Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
-                            Format: written.GetDesc().Format,
-                            Width: 4,
-                            Height: 4,
-                            Depth: 1,
-                            RowPitch: 256,
+                let dst = D3D12_TEXTURE_COPY_LOCATION {
+                    pResource: std::mem::transmute_copy(written),
+                    Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                    Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                        SubresourceIndex: 0,
+                    },
+                };
+                let src = D3D12_TEXTURE_COPY_LOCATION {
+                    pResource: std::mem::transmute_copy(&upload),
+                    Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+                    Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                        PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
+                            Offset: 0,
+                            Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
+                                Format: written.GetDesc().Format,
+                                Width: 4,
+                                Height: 4,
+                                Depth: 1,
+                                RowPitch: 256,
+                            },
                         },
                     },
-                },
-            };
-            crate::list::ensure_state(&seed, source, D3D12_RESOURCE_STATE_COPY_DEST.0 as u32);
-            seed.list.CopyTextureRegion(&dst, 0, 0, 0, &src, None);
-        }
+                };
+                crate::list::ensure_state(list, target, D3D12_RESOURCE_STATE_COPY_DEST.0 as u32);
+                list.list.CopyTextureRegion(&dst, 0, 0, 0, &src, None);
+            }
+            list.keep(&upload);
+        };
+        let packed_light = 0x8c02_0100;
+        let marker = 0x1234_5678;
+        let next_light = 0x4a03_0201;
+        let seed = host.new_list().unwrap();
+        write_pattern(&seed, source, packed_light);
+        write_pattern(&seed, next_source, next_light);
         seed.close();
         host.execute(&[&seed]);
 
         let list = host.new_list().unwrap();
+        let read_view = || {
+            crate::list::ensure_state(&list, view, D3D12_RESOURCE_STATE_COPY_SOURCE.0 as u32);
+            crate::capture::read_back(&host.device, &list.list, sampled).unwrap()
+        };
         crate::texture::upload(&list, view, sampled);
         assert!(crate::texture::alias(&list, view, source));
-        crate::list::ensure_state(&list, view, D3D12_RESOURCE_STATE_COPY_SOURCE.0 as u32);
-        let (readback, rows) = crate::capture::read_back(&host.device, &list.list, sampled).unwrap();
+        let after_upload = read_view();
+        // Only change the destination. An unnecessary second copy from the
+        // same writer would overwrite this marker with the first pattern.
+        write_pattern(&list, view, marker);
+        assert!(crate::texture::alias(&list, view, source));
+        let after_repeat = read_view();
+        // The new writer has no earlier use on this list. Only its identity
+        // can trigger the refresh, independently of any source transition.
+        assert!(crate::texture::alias(&list, view, next_source));
+        let after_switch = read_view();
         list.close();
         host.execute(&[&list]);
-        let mut mapped = std::ptr::null_mut();
-        // SAFETY: the completed copy contains at least one 32-bit texel.
-        let actual = unsafe {
-            readback.Map(0, None, Some(&mut mapped)).unwrap();
-            let texel = mapped.cast::<u8>().add(rows.Offset as usize).cast::<u32>().read_unaligned();
-            readback.Unmap(0, None);
-            texel
-        };
+        let first_texel =
+            |(readback, rows): (ID3D12Resource, D3D12_PLACED_SUBRESOURCE_FOOTPRINT)| {
+                let mut mapped = std::ptr::null_mut();
+                // SAFETY: the completed copy contains at least one 32-bit texel.
+                unsafe {
+                    readback.Map(0, None, Some(&mut mapped)).unwrap();
+                    let texel = mapped
+                        .cast::<u8>()
+                        .add(rows.Offset as usize)
+                        .cast::<u32>()
+                        .read_unaligned();
+                    readback.Unmap(0, None);
+                    texel
+                }
+            };
         resource_release(view);
+        resource_release(next_source);
         resource_release(source);
-        assert_eq!(actual, packed_light, "the sampled texture kept the CPU upload instead of the GPU atlas");
+        let [first, repeated, switched] =
+            [after_upload, after_repeat, after_switch].map(first_texel);
+        eprintln!("alias readbacks: {first:#010x}, {repeated:#010x}, {switched:#010x}");
+        assert_eq!(first, packed_light, "the view kept the title upload");
+        assert_eq!(repeated, marker, "the unchanged writer was copied again");
+        assert_eq!(
+            switched, next_light,
+            "the new writer did not refresh the view"
+        );
     }
 
     /// A 16-bit depth texture the title also asks unordered access for gets
