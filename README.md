@@ -2,38 +2,71 @@
 
 A fork of [VIctory](https://github.com/Marvisak/VIctory), a compatibility layer
 that runs an Xbox Series title natively on Windows from files the user supplies.
-This one is about **speed on AMD RDNA 3**: the world at 30 frames a second on
-one PC, without giving up the picture. It is not there yet.
+
+## The goal
+
+**A stable 30 fps or more without ray tracing, then as high a frame rate and as
+low frame times as the PC allows**, on an AMD RX 7900 XTX first and on PCs with
+32 GB (later 16 GB) of RAM.
+
+The way there is **porting, not emulating**: patching the title's renderer so it
+behaves the way a PC renderer does, rather than having the layer watch and copy
+the console's shared memory every frame. Shaders are translated ahead of time
+into a versioned store that is kept between builds. Ray tracing stays optional
+and off by default. The picture comes after the frame rate: texture pop-in and
+lighting that is too bright or too dark when walking indoors are next in line.
 
 **This repository contains no game files, code or assets.** You need your own
 copy of the game. It is not affiliated with or endorsed by the game's developer
 or publisher.
 
-## Where it stands (2026-11-25)
+## Where it stands (2026-11-26)
 
 Tested on one machine only: Windows 11, Intel i9-12900K, 64 GB RAM, Radeon
-RX 7900 XTX, 1440p, the Series X profile.
+RX 7900 XTX, ray tracing off.
 
 | | |
 |---|---|
-| Menus, videos, loading screens | 30 fps |
-| Prologue, indoors | 50-75 ms a frame (13-20 fps) |
-| First mission with the boat | 46-53 ms (19-22 fps) |
-| Street chase with many cars and people | 100-165 ms (6-10 fps), single frames far longer |
-| Outdoors on foot, the camp | 60-90 ms |
-| Flying | 42-57 ms |
-| Longest session so far | 41 minutes, no crash |
-| Memory | 40-46 GB of private memory: **64 GB of RAM recommended** |
+| City street, Series S profile, renderer patches 1, 2, 5, 6 and 7 on | about 45 ms a frame (about 22 fps, 44.9 ms in run merge-5) |
+| Same, patches 1, 2, 5 and 6 | 45.6 ms, p95 47 ms |
+| Same, patches 1, 2 and 5 | 47.3 ms (about 21 fps), p95 49 ms |
+| Series X profile, patches 1+2 | about 53 ms (about 19 fps) |
+| Same scene before the patches | 57-75 ms (13-17 fps) |
+| Shaders the title uses that translate | all of them (25,790 of 25,985; the rest are unused geometry shaders) |
+| Memory | about 30 GB of private memory, 10.5 GB of VRAM: **64 GB of RAM recommended** for now |
 
-It started at 280 ms a frame in the same scenes two days earlier.
+It started at 280 ms a frame in the same scenes three days earlier. What sets
+the frame now is the one thread that submits the title's work to the card
+(about 40 ms); the card itself needs about 36 ms and now waits about 7 ms a frame with nothing queued.
+
+### Renderer patches (off by default while they are tested)
+
+| Switch | What it does |
+|---|---|
+| `VICTORY_PORT_CONSTANTS=1` | The title's 174 MB constants heap is read by the card where the title writes it: no uploads, no fills |
+| `VICTORY_PORT_DESCRIPTORS=1` | The title's descriptor-table stores are patched (byte-checked) to report the slots they write, instead of a scan of ~600,000 slots a frame |
+| `VICTORY_PORT_CBV=1` | Translated shaders read constant buffers in place as raw bytes (~22,000 fills a frame to none; -4.7 ms) |
+| `VICTORY_PORT_GUARD=1` | The write guards' lock is shared by faults and refreshes, with a claim per 64 KiB block; the submission's planning runs beside it (title threads' waits 29 ms to ~2 ms a frame; -2 ms) |
+| `VICTORY_PORT_JOURNAL=1` | The heaps' records are asked for at the title's submit, and the journal's notes are split into 64 parts with locks of their own (the submit thread's waits ~5 ms + 1 ms to ~0.3 ms; -1 to -3 ms) |
+
+### Other switches
+
+| Switch | What it does |
+|---|---|
+| `--console series-s` | The Series S profile: 1080p output, about 5 ms faster, a softer picture |
+| `VICTORY_OUTPUT=1920x1080` | The title renders to that output size itself (Series X profile; about 16 ms less card time) |
+| `VICTORY_FRAME_INTERVAL_MS=16.667` | Lets the title go above 30 fps (menus and videos reach 60; the game's clock stays right) |
+| `VICTORY_AMBIENT_SETTLE` | How fast light settles after walking indoors (on by default, `250,3`; `0` turns it off) |
+| `VICTORY_TEXTURE_STORE=1` | Converted textures kept between runs (about 8 ms a frame for now: off) |
 
 What is known to be wrong:
 
-- Trees, plants and far buildings flicker outdoors in some places.
-- Rooms with little direct light are too dark without `-RayTracing`.
+- Trees, signs and far objects flicker in the distance in some places.
+- Lighting is too bright or too dark after walking indoors, until the title has
+  run for a while; rooms with little direct light are too dark without `-RayTracing`.
 - Textures of what just came into view appear late while the title streams.
-- The first run with a new driver or a new build stutters while the driver makes
-  pipelines (`victory warm` makes them ahead).
+- The first run of a new build stutters while the driver makes pipelines
+  (`victory warm` makes them ahead).
 - Recording a frame in the world makes the title's own watchdog end it.
 
 ## How to run it
@@ -52,6 +85,26 @@ scripts\play.ps1 -Exe <path of your copy's executable>
 
 `scripts\play.ps1 -Safe` leaves out the newest, faster ways; try it first when
 something is wrong. `-RayTracing` turns the title's ray-traced indirect light on.
+
+For PC FSR 4.1.2, set `[paths].fidelityfx_dir` in `victory.toml` or
+`VICTORY_FIDELITYFX_DIR` to the folder containing AMD's signed
+`amd_fidelityfx_upscaler_dx12.dll`. Use the DirectX 12 upscaler in
+`Kits/FidelityFX/signedbin`. [AMD FSR SDK 2.4.0](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/tree/v2.4.0/Kits/FidelityFX/signedbin)
+
+`scripts\play.ps1 -Exe <path> -Fsr4K quality` selects 2560×1440 input for
+the retail 1.0.2.1 Series X 4K SDR profile. `balanced` selects 2258×1270
+and `performance` selects 1920×1080. All three output 3840×2160. With
+`victory run` directly, set `VICTORY_FSR_4K` to the preset name.
+The log reports the provider at context creation and the actual input and
+output sizes at the first successful temporal dispatch. The title profile
+and PC FidelityFX bridge were ported from [DexNom/VIctory](https://github.com/DexNom/VIctory/commit/ab34a8b21477c94da2a6cf07249138e8bc84602e).
+
+On a hybrid-graphics PC, the runtime and offline pipeline checks prefer a
+high-performance adapter with Shader Model 6.6. The runtime logs its adapter
+name, PCI vendor and device IDs, and dedicated VRAM. Set
+`VICTORY_D3D12_ADAPTER` to a zero-based DXGI index or part of the adapter's
+name to select it explicitly. With the launcher, pass
+`-More @{VICTORY_D3D12_ADAPTER='NVIDIA'}`.
 
 Before the first run, ahead of time (both can be stopped and go on later):
 
